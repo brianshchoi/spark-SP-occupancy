@@ -8,6 +8,7 @@
   *  Note: change the path of "checkpoint" directory on your computer at this line
   *  .config("spark.sql.streaming.checkpointLocation", "file:///home/pi/spark-applications/Kafka-checkpoint/checkpoint")
   */
+import org.apache.log4j._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -19,15 +20,17 @@ object Spark_Kafka_SP_Aggregation {
   def main(args: Array[String]) {
     //******************************************************
     //=== Step 1: Create a Spark session, and run it on local mode =======
+    val checkpointLocation = "file:///Users/brianchoi/checkpoint"
+    val dailyCheckpointLocation = "file:///Users/brianchoi/dailyCheckpointLocation"
+    val jsonQueryLocation = "src/main/resources/output/"
+
     val spark = SparkSession.builder()
       .appName("Spark_Kafka_SP_Aggregation")
-
       // Desktop application
       .master("local[2]")
-
       // Cluster application
 //      .master("spark://lpc01-master:7077")
-      .config("spark.sql.streaming.checkpointLocation", "file:///Users/brianchoi/checkpoint") //SANG: for RPi
+      .config("spark.sql.streaming.checkpointLocation", checkpointLocation) //SANG: for RPi
       .getOrCreate()
     import spark.implicits._
 
@@ -60,14 +63,14 @@ object Spark_Kafka_SP_Aggregation {
 
     val rawData = kafkaData.selectExpr("CAST(Value as STRING)")
 
-    println("\n=== rawData schema ====")
-    rawData.printSchema
+//    println("\n=== rawData schema ====")
+//    rawData.printSchema
 
     //******************************************************
     //=== Step 3: Define a schema and parse JSON messages =======
     //=== Step 3.1: Define a schema for JSON message read from Kafka topic =======
     // {"timestamp": "2019-08-24T00:00:01.538+12:00","nodeID": "57:21:61:6f:a8:28","payload": {"occupied": 1}}
-    val schema = (new StructType)
+    val schema = new StructType()
       .add("timestamp", StringType)
       .add("nodeID", StringType)
       .add("payload", (new StructType)
@@ -82,32 +85,126 @@ object Spark_Kafka_SP_Aggregation {
       .select($"timestamp", $"nodeID", $"payload.occupied")
       .withColumn("timestamp", $"timestamp".cast(TimestampType))
       .withColumn("nodeID", $"nodeID".cast(StringType))
-      .withColumn("occupied", $"occupied".cast(IntegerType))
+      .withColumn("occupied", $"occupied".cast(IntegerType)).as("parkingOccupied")
 
     println("\n=== parkingData schema ====")
     parkingData.printSchema
 
-    //******************************************************
-    //=== Step 4: Process data =======
-    val parkingData_agg = parkingData
-      .withWatermark("timestamp", "5 minutes")
-      .groupBy(window($"timestamp", "5 minutes", "5 minutes"))
-      .agg(sum("occupied") as "Current-occupancy")
+//    val dailyData = parkingData
+//      .withWatermark("timestamp", "1 day")
+//      .groupBy()
+//
+//      .writeStream
+//      .outputMode("complete")
+//      .format("console")
+//      .option("truncate", false)
+//            .option("checkpointLocation", "file:///Users/brianchoi/dailyOutputCheckpoint")
+//      //      .trigger(Trigger.Continuous("1 second"))
+//      .start()
+//      .awaitTermination()
 
-      //.withColumn("current-time", $"window.end")
-      .withColumn("current-time", $"window.start")
-      .select( "current-time", "Current-occupancy")
-      .orderBy("current-time")
-
-    //******************************************************
-    //=== Step 5: Output streaming result =======
-    parkingData_agg
+    // Change to kafka checkpoint
+    parkingData
+//      .withWatermark("timestamp", "1 day")
+//      .groupBy()
       .writeStream
-      .outputMode("complete")
+      .queryName("node_interactions")
+      .outputMode("append")
+      .format("json")
+      .option("path", jsonQueryLocation)
+      .option("checkpointLocation", dailyCheckpointLocation)
+      .start()
+
+    val jsonStruct = new StructType()
+      .add("timestamp", StringType)
+      .add("nodeID", StringType)
+      .add("occupied", StringType)
+
+    val jsonDataFrame = spark.readStream.schema(jsonStruct).json("src/main/resources/output")
+      .writeStream
+      .outputMode("append")
       .format("console")
       .option("truncate", false)
       .start()
       .awaitTermination()
 
-  }
-}
+
+//
+//    //Process Data
+//    val parkingData_agg = jsonDataFrame.groupBy("nodeID").count()
+//    val latestNodeChanges = jsonDataFrame.groupBy("jsonNodeID")
+//    .agg(max("timestamp").cast(TimestampType).as("latestTimestamp"))
+//
+//    //******************************************************
+//    //=== Step 4: Process data =======
+//
+//    // Send joined data to kafka
+//    val joined_agg = parkingData
+//      .withWatermark("timestamp", "5 minutes")
+//      .join(latestNodeChanges,
+//        expr(
+//          """
+//            |parkingOccupied.nodeID = jsonNodeID AND
+//            |timestamp = latestTimestamp
+//          """.stripMargin
+//        ))
+////      .groupBy(window($"timestamp", "5 minutes", "5 minutes"))
+//
+//      .writeStream
+//      .format("kafka")
+//      .option("kafka.bootstrap.servers", "localhost:9092")
+//      .option("topic", "sp-joined-topic")
+//      .start()
+//
+//    val parkingData_agg = spark
+//        .readStream
+//        .format("kafka")
+//        .option("kafka.bootstrap.servers", "localhost:9092")
+//        .option("topic", "sp-joined-topic")
+//        .option("startingOffsets", "latest")
+//        .load()
+//
+//    parkingData_agg
+//      .groupBy(window($"timestamp", "5 minutes", "5 minutes"))
+//      .agg(sum("occupied"))
+//
+//      //.withColumn("current-time", $"window.end")
+//      .withColumn("current-time", $"window.start")
+//      .select( "current-time", "sum(occupied)")
+//      .orderBy("current-time")
+//
+////      .agg(max("timestamp")).select("occupied")
+////      .withWatermark("timestamp", "5 minutes")
+////      .groupBy(window($"timestamp", "5 minutes", "5 minutes"))
+////      .agg(sum("occupied") as "Current-occupancy")
+////
+////      //.withColumn("current-time", $"window.end")
+////      .withColumn("current-time", $"window.start")
+////      .select( "current-time", "Current-occupancy")
+////      .orderBy("current-time")
+//
+//
+//    parkingData_agg
+//      .writeStream
+//      .outputMode("append")
+//      .format("console")
+//      .option("truncate", false)
+//      .start()
+//      .awaitTermination()
+
+
+    //******************************************************
+    //=== Step 5: Output streaming result =======
+//    parkingData_agg
+//      .writeStream
+//      .outputMode("complete")
+//      .format("console")
+//      .option("truncate", false)
+////      .option("checkpointLocation", "file:///Users/brianchoi/outputcheckpoint")
+////      .trigger(Trigger.Continuous("1 second"))
+//      .start()
+//      .awaitTermination()
+
+
+
+}}
