@@ -13,8 +13,6 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
-import org.apache.log4j._
-
 object Spark_Kafka_SP_Aggregation {
 
   def main(args: Array[String]) {
@@ -87,8 +85,10 @@ object Spark_Kafka_SP_Aggregation {
       .withColumn("nodeID", $"nodeID".cast(StringType))
       .withColumn("occupied", $"occupied".cast(IntegerType)).as("parkingOccupied")
 
-    println("\n=== parkingData schema ====")
-    parkingData.printSchema
+
+
+//    println("\n=== parkingData schema ====")
+//    parkingData.printSchema
 
 //    val dailyData = parkingData
 //      .withWatermark("timestamp", "1 day")
@@ -105,8 +105,6 @@ object Spark_Kafka_SP_Aggregation {
 
     // Change to kafka checkpoint
     parkingData
-//      .withWatermark("timestamp", "1 day")
-//      .groupBy()
       .writeStream
       .queryName("node_interactions")
       .outputMode("append")
@@ -120,23 +118,39 @@ object Spark_Kafka_SP_Aggregation {
       .add("nodeID", StringType)
       .add("occupied", StringType)
 
+//    val jsonDataFrame = spark.readStream.schema(jsonStruct).json("src/main/resources/output")
+//        .groupBy("nodeID")
+
     val jsonDataFrame = spark.readStream.schema(jsonStruct).json("src/main/resources/output")
-      .writeStream
-      .outputMode("append")
+          .withColumn("timestampTyped", $"timestamp".cast(TimestampType))
+          .drop("timestamp")
+          .withWatermark( "timestampTyped", "5 minutes")
+          .groupBy("nodeID")
+          .agg(sum("occupied"))
+
+//        .groupBy("nodeID").count()
+
+    jsonDataFrame.writeStream
+      .outputMode("complete")
       .format("console")
       .option("truncate", false)
       .start()
       .awaitTermination()
 
 
-//
+
 //    //Process Data
-//    val parkingData_agg = jsonDataFrame.groupBy("nodeID").count()
-//    val latestNodeChanges = jsonDataFrame.groupBy("jsonNodeID")
+//    val parkingData_agg = jsonDataFrame.groupBy("nodeID").count
+
+    // org.apache.spark.sql.AnalysisException: Append output mode not supported when there are streaming aggregations on streaming DataFrames/DataSets without watermark;;
+//    val latestNodeChanges = jsonDataFrame
+//    .groupBy("nodeID")
 //    .agg(max("timestamp").cast(TimestampType).as("latestTimestamp"))
-//
-//    //******************************************************
-//    //=== Step 4: Process data =======
+//      .show()
+
+
+    //******************************************************
+    //=== Step 4: Process data =======
 //
 //    // Send joined data to kafka
 //    val joined_agg = parkingData
