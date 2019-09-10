@@ -11,6 +11,7 @@
 
 import org.apache.log4j._
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
@@ -22,8 +23,9 @@ object Spark_Kafka_SP_Aggregation {
     //=== Step 1: Create a Spark session, and run it on local mode =======
 
     // Local Mode
-    val sparkMaster = "local[2]"
+    val sparkMaster = "local[*]"
     val checkpointLocation = "file:///Users/brianchoi/checkpoint"
+    val checkpointLocation2 = "file:///Users/brianchoi/checkpoint2"
     val dailyCheckpointLocation = "file:///Users/brianchoi/dailyCheckpointLocation"
     val latestJsonCheckpointLocation = "file:///Users/brianchoi/latestCheckpointLocation"
     val jsonQueryLocation = "src/main/resources/output/all"
@@ -122,9 +124,11 @@ object Spark_Kafka_SP_Aggregation {
         $"nodeID",
         window($"timestamp", "1 minute", "1 minute")
       )
-      .agg(last("occupied") as "lastest-occupancy")
+      .agg(last("occupied") as "latest-occupancy")
       .withColumn("current-time", $"window.start")
-          .orderBy("current-time")
+      .withColumn("latest-occupancy-string", $"latest-occupancy".cast(StringType))
+      .drop("window", "latest-occupancy")
+      .orderBy("current-time")
 
     //    parkingDataPerNodePerWindow
     //      .writeStream
@@ -135,15 +139,95 @@ object Spark_Kafka_SP_Aggregation {
     //      .option("checkpointLocation", latestJsonCheckpointLocation)
     //      .start()
     //      .awaitTermination()
+//    parkingDataPerNodePerWindow
+//      .writeStream
+//      .outputMode("complete")
+//      .format("console")
+//      .option("truncate", false)
+//      .start()
+//      .awaitTermination()
 
-
-    parkingDataPerNodePerWindow
+    val stream1 = parkingDataPerNodePerWindow
+      .selectExpr("CAST(nodeID AS STRING) AS key", "to_json(struct(*)) AS value")
       .writeStream
+      .format("kafka")
       .outputMode("complete")
+      .option("kafka.bootstrap.servers", kafkaBrokers)
+      .option("topic", "sp-output-topic")
+      .start()
+
+
+//    val spark2 = SparkSession.builder()
+//      .appName("Spark_agg")
+//      .master(sparkMaster)
+//      .config("spark.sql.streaming.checkpointLocation", checkpointLocation2) //SANG: for RPi
+//      .getOrCreate()
+
+    val occupancyAggregation = spark
+      .readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", kafkaBrokers)
+      .option("subscribe", "sp-output-topic") //subscribe Kafka topic name: sp-output-topic
+      //.option("startingOffsets", "earliest")
+      .option("startingOffsets", "latest")
+      .load()
+
+    val rawData2 = occupancyAggregation.selectExpr("CAST(Value as STRING)")
+    rawData2.printSchema()
+
+    val schema2 = new StructType()
+      .add("nodeID", StringType)
+      .add("latest-occupancy-string", StringType)
+      .add("current-time", StringType)
+
+    val latestOccupancyData = rawData2
+      .select(from_json(col("Value"), schema2).alias("latestOccupancyData")) //SANG: Value from Kafka topic
+      .select("latestOccupancyData.*") //SANG: 2 lines are OK, but want to test the line below
+      .select($"nodeID", $"latest-occupancy-string", $"current-time")
+//      .withColumn("nodeID", $"nodeID")
+//      .withColumn("latest-occup", $"nodeID".cast(StringType))
+//      .withColumn("occupied", $"occupied")
+
+    latestOccupancyData
+      .writeStream
+      .outputMode("append")
       .format("console")
       .option("truncate", false)
       .start()
-      .awaitTermination()
+      spark.streams.awaitAnyTermination()
+//    occupancyAggregation.printSchema()
+//
+//
+//      occupancyAggregation
+//      .writeStream
+//      .outputMode("complete")
+//      .format("console")
+//      .option("truncate", false)
+//      .start()
+//      .awaitTermination()
+
+
+//    //https://stackoverflow.com/questions/45450131/get-the-row-corresponding-to-the-latest-timestamp-in-a-spark-dataset-using-scala
+//    val windowSpec = Window.partitionBy("Node-ID", "Latest-Occupancy")
+//      .orderBy(col("Timestamp").desc)
+//
+//    occupancyAggregation
+//      .withColumn("Node-ID", $"nodeID".cast(StringType))
+//      .withColumn("Timestamp", $"current-time".cast(TimestampType)) //SANG: this timestamp belongs to Kafka
+//      .withColumn("Latest-Occupancy", $"latest-occupancy".cast(StringType))
+//      .withColumn("maxTS", first($"Timestamp").over(windowSpec))
+//      .withWatermark("Timestamp", "1 hour")
+//      .select("*").where(col("maxTS") === col("Timestamp"))
+//      .groupBy(
+//        window($"Timestamp", "1 minute", "1 minute")
+//      )
+//      .agg(sum($"Latest-Occupancy"))
+//      .writeStream
+//      .outputMode("complete")
+//      .format("console")
+//      .option("truncate", false)
+//      .start()
+//      .awaitTermination()
 
 
     //    val jsonStruct = new StructType()
