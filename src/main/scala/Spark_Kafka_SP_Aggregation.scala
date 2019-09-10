@@ -29,7 +29,7 @@ object Spark_Kafka_SP_Aggregation {
     val jsonQueryLocation = "src/main/resources/output/all"
     val latestJsonLocation = "src/main/resources/output/latest"
     val kafkaBrokers = "localhost:9092"
-    val topicName = "sp-topic"
+    val topicName = "sp-topic-1"
 
     // Production mode
     //    val sparkMaster = "spark://lpc01-master:7077"
@@ -99,9 +99,6 @@ object Spark_Kafka_SP_Aggregation {
       .withColumn("nodeID", $"nodeID".cast(StringType))
       .withColumn("occupied", $"occupied".cast(IntegerType)).as("parkingOccupied")
 
-
-
-
     //    println("\n=== parkingData schema ====")
     //    parkingData.printSchema
 
@@ -119,13 +116,11 @@ object Spark_Kafka_SP_Aggregation {
     //      .awaitTermination()
 
     // Change to kafka checkpoint
-
-
     val parkingDataPerNodePerWindow = parkingData
       .withWatermark("timestamp", "1 hour")
       .groupBy(
         $"nodeID",
-        window($"timestamp", "30 seconds", "30 seconds")
+        window($"timestamp", "1 minute", "1 minute")
       )
       .agg(last("occupied") as "lastest-occupancy")
       .withColumn("current-time", $"window.start")
