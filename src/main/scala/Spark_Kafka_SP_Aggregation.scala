@@ -121,14 +121,18 @@ object Spark_Kafka_SP_Aggregation {
     val parkingDataPerNodePerWindow = parkingData
       .withWatermark("timestamp", "1 hour")
       .groupBy(
-        $"nodeID",
-        window($"timestamp", "1 minute", "1 minute")
+        $"nodeID"
+//        ,
+//        window($"timestamp", "1 minute", "1 minute")
       )
-      .agg(last("occupied") as "latest-occupancy")
-      .withColumn("current-time", $"window.start")
-      .withColumn("latest-occupancy-string", $"latest-occupancy".cast(StringType))
-      .drop("window", "latest-occupancy")
-      .orderBy("current-time")
+      .agg(
+        last("occupied") as "latest-occupancy",
+        max("timestamp") as "latest-timestamp"
+      )
+//      .withColumn("current-time", $"window.start")
+//      .withColumn("latest-occupancy-string", $"latest-occupancy".cast(StringType))
+//      .drop("window", "latest-occupancy")
+      .orderBy("latest-timestamp")
 
     //    parkingDataPerNodePerWindow
     //      .writeStream
@@ -147,7 +151,7 @@ object Spark_Kafka_SP_Aggregation {
 //      .start()
 //      .awaitTermination()
 
-    val stream1 = parkingDataPerNodePerWindow
+    parkingDataPerNodePerWindow
       .selectExpr("CAST(nodeID AS STRING) AS key", "to_json(struct(*)) AS value")
       .writeStream
       .format("kafka")
@@ -177,34 +181,78 @@ object Spark_Kafka_SP_Aggregation {
 
     val schema2 = new StructType()
       .add("nodeID", StringType)
-      .add("latest-occupancy-string", StringType)
-      .add("current-time", StringType)
+      .add("latest-occupancy", StringType)
+      .add("latest-timestamp", StringType)
 
     val latestOccupancyData = rawData2
       .select(from_json(col("Value"), schema2).alias("latestOccupancyData")) //SANG: Value from Kafka topic
       .select("latestOccupancyData.*") //SANG: 2 lines are OK, but want to test the line below
-      .select($"nodeID", $"latest-occupancy-string", $"current-time")
+      .groupBy("nodeID")
+      .agg(
+        last("latest-timestamp"),
+        last("latest-occupancy")
+      )
+      .withColumn("current-time", current_timestamp())
+    //      .select($"nodeID", $"latest-occupancy-string", $"current-time")
 //      .withColumn("nodeID", $"nodeID")
 //      .withColumn("latest-occup", $"nodeID".cast(StringType))
 //      .withColumn("occupied", $"occupied")
 
-    latestOccupancyData
-      .writeStream
-      .outputMode("append")
-      .format("console")
-      .option("truncate", false)
-      .start()
-      spark.streams.awaitAnyTermination()
-//    occupancyAggregation.printSchema()
-//
-//
-//      occupancyAggregation
+//    latestOccupancyData
 //      .writeStream
 //      .outputMode("complete")
 //      .format("console")
 //      .option("truncate", false)
 //      .start()
-//      .awaitTermination()
+//      spark.streams.awaitAnyTermination()
+
+    latestOccupancyData
+      .selectExpr("CAST(nodeID AS STRING) AS key", "to_json(struct(*)) AS value")
+      .writeStream
+      .format("kafka")
+      .outputMode("complete")
+      .option("kafka.bootstrap.servers", kafkaBrokers)
+      .option("topic", "sp-aggregate-topic")
+      .start()
+
+
+    val occupancyCountAggregation = spark
+      .readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", kafkaBrokers)
+      .option("subscribe", "sp-aggregate-topic") //subscribe Kafka topic name: sp-output-topic
+      //.option("startingOffsets", "earliest")
+      .option("startingOffsets", "latest")
+      .load()
+
+    val rawData3 = occupancyCountAggregation.selectExpr("CAST(Value as STRING)")
+    rawData3.printSchema()
+
+    val schema3 = new StructType()
+      .add("nodeID", StringType)
+      .add("last(latest-timestamp, false)", StringType)
+      .add("last(latest-occupancy, false)", StringType)
+      .add("current-time", StringType)
+
+    val latestOccupancyCountData = rawData3
+      .select(from_json(col("Value"), schema3).alias("latestOccupancyCountData")) //SANG: Value from Kafka topic
+      .select("latestOccupancyCountData.*") //SANG: 2 lines are OK, but want to test the line below
+      .groupBy("current-time")
+      .agg(
+        sum("last(latest-occupancy, false)")
+      )
+      .orderBy($"current-time".desc)
+
+      .writeStream
+      .outputMode("complete")
+      .format("console")
+      .option("truncate", false)
+      .start()
+      .awaitTermination()
+//    occupancyAggregation.printSchema()
+//
+//
+
 
 
 //    //https://stackoverflow.com/questions/45450131/get-the-row-corresponding-to-the-latest-timestamp-in-a-spark-dataset-using-scala
