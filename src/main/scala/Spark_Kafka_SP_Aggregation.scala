@@ -11,12 +11,10 @@
 
 import org.apache.log4j._
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
 object Spark_Kafka_SP_Aggregation {
-
 
   def main(args: Array[String]) {
     //******************************************************
@@ -29,10 +27,10 @@ object Spark_Kafka_SP_Aggregation {
     val topicName = "sp-topic-1"
 
     // Production mode
-//    val sparkMaster = "spark://lpc01-master:7077"
-//    val checkpointLocation = "file:///home/pi/spark-applications/Kafka-checkpoint/checkpoint"
-//    val kafkaBrokers = "lpc01-kafka01:9092"
-//    val topicName = "sp-occupancy-1"
+    //    val sparkMaster = "spark://lpc01-master:7077"
+    //    val checkpointLocation = "file:///home/pi/spark-applications/Kafka-checkpoint/checkpoint"
+    //    val kafkaBrokers = "lpc01-kafka01:9092"
+    //    val topicName = "sp-occupancy-1"
 
     val spark = SparkSession.builder()
       .appName("Spark_Kafka_SP_Aggregation")
@@ -68,14 +66,11 @@ object Spark_Kafka_SP_Aggregation {
 
     val rawData = kafkaData.selectExpr("CAST(Value as STRING)")
 
-    //    println("\n=== rawData schema ====")
-    //    rawData.printSchema
-
     //******************************************************
     //=== Step 3: Define a schema and parse JSON messages =======
     //=== Step 3.1: Define a schema for JSON message read from Kafka topic =======
     // {"timestamp": "2019-08-24T00:00:01.538+12:00","nodeID": "57:21:61:6f:a8:28","payload": {"occupied": 1}}
-    val schema = new StructType()
+    val dataStreamSchema = new StructType()
       .add("timestamp", StringType)
       .add("nodeID", StringType)
       .add("payload", (new StructType)
@@ -85,7 +80,7 @@ object Spark_Kafka_SP_Aggregation {
     //******************************************************
     //=== Step 3.2: Parse JSON messages =======
     val parkingData = rawData
-      .select(from_json(col("Value"), schema).alias("parkingData")) //SANG: Value from Kafka topic
+      .select(from_json(col("Value"), dataStreamSchema).alias("parkingData")) //SANG: Value from Kafka topic
       .select("parkingData.*") //SANG: 2 lines are OK, but want to test the line below
       .select($"timestamp", $"nodeID", $"payload.occupied")
       .withColumn("timestamp", $"timestamp".cast(TimestampType))
@@ -104,23 +99,6 @@ object Spark_Kafka_SP_Aggregation {
       )
       .orderBy("latest-timestamp")
 
-    //    parkingDataPerNodePerWindow
-    //      .writeStream
-    //      .outputMode("append")
-    //      .format("kafka")
-    //      .option("kafka.bootstrap.servers", kafkaBrokers)
-    //      .option("topic", "sp-latest-topic")
-    //      .option("checkpointLocation", latestJsonCheckpointLocation)
-    //      .start()
-    //      .awaitTermination()
-//    parkingDataPerNodePerWindow
-//      .writeStream
-//      .outputMode("complete")
-//      .format("console")
-//      .option("truncate", false)
-//      .start()
-//      .awaitTermination()
-
     parkingDataPerNodePerWindow
       .selectExpr("CAST(nodeID AS STRING) AS key", "to_json(struct(*)) AS value")
       .writeStream
@@ -130,51 +108,32 @@ object Spark_Kafka_SP_Aggregation {
       .option("topic", "sp-output-topic")
       .start()
 
-
-//    val spark2 = SparkSession.builder()
-//      .appName("Spark_agg")
-//      .master(sparkMaster)
-//      .config("spark.sql.streaming.checkpointLocation", checkpointLocation2) //SANG: for RPi
-//      .getOrCreate()
-
     val occupancyAggregation = spark
       .readStream
       .format("kafka")
       .option("kafka.bootstrap.servers", kafkaBrokers)
-      .option("subscribe", "sp-output-topic") //subscribe Kafka topic name: sp-output-topic
+      .option("subscribe", "sp-output-topic")
       //.option("startingOffsets", "earliest")
       .option("startingOffsets", "latest")
       .load()
 
-    val rawData2 = occupancyAggregation.selectExpr("CAST(Value as STRING)")
-    rawData2.printSchema()
+    val dataStreamFromKafka = occupancyAggregation.selectExpr("CAST(Value as STRING)")
+    dataStreamFromKafka.printSchema()
 
-    val schema2 = new StructType()
+    val dataStreamFromKafkaStruct = new StructType()
       .add("nodeID", StringType)
       .add("latest-occupancy", StringType)
       .add("latest-timestamp", StringType)
 
-    val latestOccupancyData = rawData2
-      .select(from_json(col("Value"), schema2).alias("latestOccupancyData")) //SANG: Value from Kafka topic
-      .select("latestOccupancyData.*") //SANG: 2 lines are OK, but want to test the line below
+    val latestOccupancyData = dataStreamFromKafka
+      .select(from_json(col("Value"), dataStreamFromKafkaStruct).alias("latestOccupancyData"))
+      .select("latestOccupancyData.*")
       .groupBy("nodeID")
       .agg(
         last("latest-timestamp"),
         last("latest-occupancy")
       )
       .withColumn("current-time", current_timestamp())
-    //      .select($"nodeID", $"latest-occupancy-string", $"current-time")
-//      .withColumn("nodeID", $"nodeID")
-//      .withColumn("latest-occup", $"nodeID".cast(StringType))
-//      .withColumn("occupied", $"occupied")
-
-//    latestOccupancyData
-//      .writeStream
-//      .outputMode("complete")
-//      .format("console")
-//      .option("truncate", false)
-//      .start()
-//      spark.streams.awaitAnyTermination()
 
     latestOccupancyData
       .selectExpr("CAST(nodeID AS STRING) AS key", "to_json(struct(*)) AS value")
@@ -185,7 +144,6 @@ object Spark_Kafka_SP_Aggregation {
       .option("topic", "sp-aggregate-topic")
       .start()
 
-
     val occupancyCountAggregation = spark
       .readStream
       .format("kafka")
@@ -195,25 +153,25 @@ object Spark_Kafka_SP_Aggregation {
       .option("startingOffsets", "latest")
       .load()
 
-    val rawData3 = occupancyCountAggregation.selectExpr("CAST(Value as STRING)")
-    rawData3.printSchema()
+    val latestOccupancyDataStream = occupancyCountAggregation.selectExpr("CAST(Value as STRING)")
+    latestOccupancyDataStream.printSchema()
 
-    val schema3 = new StructType()
+    val latestOccupancyDataStruct = new StructType()
       .add("nodeID", StringType)
       .add("last(latest-timestamp, false)", StringType)
       .add("last(latest-occupancy, false)", StringType)
       .add("current-time", StringType)
 
-    val latestOccupancyCountData = rawData3
-      .select(from_json(col("Value"), schema3).alias("latestOccupancyCountData")) //SANG: Value from Kafka topic
-      .select("latestOccupancyCountData.*") //SANG: 2 lines are OK, but want to test the line below
+    val latestOccupancyCountData = latestOccupancyDataStream
+      .select(from_json(col("Value"), latestOccupancyDataStruct).alias("latestOccupancyCountData")) //SANG: Value from Kafka topic
+      .select("latestOccupancyCountData.*")
       .groupBy("current-time")
       .agg(
         sum("last(latest-occupancy, false)")
       )
       .withColumnRenamed("sum(last(latest-occupancy, false))", "Occupancy-Count")
       .orderBy($"current-time")
-      .select($"current-time", $"Occupancy-Count" )
+      .select($"current-time", $"Occupancy-Count")
 
     latestOccupancyCountData
       .selectExpr("to_json(struct(*)) AS value")
@@ -221,7 +179,7 @@ object Spark_Kafka_SP_Aggregation {
       .format("kafka")
       .outputMode("complete")
       .option("kafka.bootstrap.servers", kafkaBrokers)
-      .option("topic", "sp-current-occupancy-demo")
+      .option("topic", "sp-current-occupancy")
       .start()
       .awaitTermination()
   }
