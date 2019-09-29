@@ -41,6 +41,20 @@ object Spark_Kafka_SP_Aggregation {
 
     val rootLogger = Logger.getRootLogger().setLevel(Level.ERROR) //SANG: only display ERROR, not display WARN
 
+    val zoneSchema = new StructType()
+      .add("nodeID", StringType)
+      .add("zoneID", IntegerType)
+
+    val zoneDataFrame = spark
+      .read
+      .format("csv")
+      .option("header", false)
+      .schema(zoneSchema)
+      .load("./src/main/resources/carpark_zones.csv")
+      .as("zoneDataFrame")
+
+    zoneDataFrame.show
+
     //******************************************************
     //=== Step 2: Read streaming messages from Kafka topics and select desired data for processing =======
     //=== Step 2.1: Read streaming messages from Kafka topics =======
@@ -85,13 +99,15 @@ object Spark_Kafka_SP_Aggregation {
       .select($"timestamp", $"nodeID", $"payload.occupied")
       .withColumn("timestamp", $"timestamp".cast(TimestampType))
       .withColumn("nodeID", $"nodeID".cast(StringType))
-      .withColumn("occupied", $"occupied".cast(IntegerType)).as("parkingOccupied")
+      .withColumn("occupied", $"occupied".cast(IntegerType))
+      .join(zoneDataFrame, "nodeID").where($"nodeID" === $"zoneDataFrame.nodeID")
 
     // Change to kafka checkpoint
     val parkingDataPerNodePerWindow = parkingData
       .withWatermark("timestamp", "1 hour")
       .groupBy(
-        $"nodeID"
+        $"nodeID",
+        $"zoneID"
       )
       .agg(
         last("occupied") as "latest-occupancy",
@@ -122,13 +138,17 @@ object Spark_Kafka_SP_Aggregation {
 
     val dataStreamFromKafkaStruct = new StructType()
       .add("nodeID", StringType)
+      .add("zoneID", IntegerType)
       .add("latest-occupancy", StringType)
       .add("latest-timestamp", StringType)
 
     val latestOccupancyData = dataStreamFromKafka
       .select(from_json(col("Value"), dataStreamFromKafkaStruct).alias("latestOccupancyData"))
       .select("latestOccupancyData.*")
-      .groupBy("nodeID")
+      .groupBy(
+        "nodeID",
+        "zoneID"
+      )
       .agg(
         last("latest-timestamp"),
         last("latest-occupancy")
@@ -158,6 +178,7 @@ object Spark_Kafka_SP_Aggregation {
 
     val latestOccupancyDataStruct = new StructType()
       .add("nodeID", StringType)
+      .add("zoneID", IntegerType)
       .add("last(latest-timestamp, false)", StringType)
       .add("last(latest-occupancy, false)", StringType)
       .add("current-time", StringType)
@@ -165,21 +186,28 @@ object Spark_Kafka_SP_Aggregation {
     val latestOccupancyCountData = latestOccupancyDataStream
       .select(from_json(col("Value"), latestOccupancyDataStruct).alias("latestOccupancyCountData")) //SANG: Value from Kafka topic
       .select("latestOccupancyCountData.*")
-      .groupBy("current-time")
+      .groupBy("current-time", "zoneID")
       .agg(
         sum("last(latest-occupancy, false)")
       )
       .withColumnRenamed("sum(last(latest-occupancy, false))", "Occupancy-Count")
-      .orderBy($"current-time")
-      .select($"current-time", $"Occupancy-Count")
+      .orderBy($"current-time".desc, $"zoneID")
+      .select($"current-time", $"zoneID", $"Occupancy-Count")
+
+    //    latestOccupancyCountData
+    //      .selectExpr("to_json(struct(*)) AS value")
+    //      .writeStream
+    //      .format("kafka")
+    //      .outputMode("complete")
+    //      .option("kafka.bootstrap.servers", kafkaBrokers)
+    //      .option("topic", "sp-current-occupancy")
+    //      .start()
+    //      .awaitTermination()
 
     latestOccupancyCountData
-      .selectExpr("to_json(struct(*)) AS value")
       .writeStream
-      .format("kafka")
+      .format("console")
       .outputMode("complete")
-      .option("kafka.bootstrap.servers", kafkaBrokers)
-      .option("topic", "sp-current-occupancy")
       .start()
       .awaitTermination()
   }
